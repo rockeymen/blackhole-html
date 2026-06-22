@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>引力奇点 - 均衡分布精细版</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body, html {
+            width: 100%; height: 100%; overflow: hidden;
+            background-color: #000;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+        #canvas-container { width: 100%; height: 100%; position: absolute; top: 0; left: 0; z-index: 1; }
+        #ui-overlay {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            z-index: 10; pointer-events: none; display: flex; flex-direction: column;
+            justify-content: space-between; padding: 30px; color: rgba(255, 255, 255, 0.7);
+        }
+        .header h1 {
+            font-size: 1.2rem; font-weight: 300; letter-spacing: 4px; text-transform: uppercase;
+            color: rgba(255, 255, 255, 0.85); text-shadow: 0 0 10px rgba(255, 255, 255, 0.2); margin-bottom: 5px;
+        }
+        .header p { font-size: 0.75rem; letter-spacing: 1px; color: rgba(255, 255, 255, 0.4); }
+        .footer-tip { font-size: 0.75rem; letter-spacing: 1px; color: rgba(255, 255, 255, 0.3); text-align: center; }
+    </style>
+</head>
+<body>
+
+    <div id="canvas-container"></div>
+
+    <div id="ui-overlay">
+        <div class="header">
+            <h1>Singularity</h1>
+            <p>相对论引力透镜 · 窄盘面无缝缩放</p>
+        </div>
+        <div class="footer-tip">
+            已彻底修复远距离视界裁切Bug | 1/2 宽度精细光环（均衡分布）
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+
+    <script>
+        const container = document.getElementById('canvas-container');
+        
+        const scene = new THREE.Scene();
+        const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        container.appendChild(renderer.domElement);
+
+        const mathCamera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+        mathCamera.position.set(0, 4, 20);
+
+        const controls = new THREE.OrbitControls(mathCamera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+        controls.minDistance = 6;
+        controls.maxDistance = 400; 
+        controls.autoRotate = true;
+        controls.autoRotateSpeed = 0.2;
+
+        const quadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+        const quadGeo = new THREE.PlaneGeometry(2, 2);
+        
+        const raymarchMaterial = new THREE.ShaderMaterial({
+            uniforms: {
+                uTime: { value: 0 },
+                uResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
+                uCamMatrix: { value: new THREE.Matrix4() },
+                uCamPos: { value: new THREE.Vector3() },
+                uFovFactor: { value: Math.tan((mathCamera.fov * Math.PI) / 360.0) }
+            },
+            vertexShader: `
+                varying vec2 vUv;
+                void main() {
+                    vUv = uv;
+                    gl_Position = vec4(position, 1.0);
+                }
+            `,
+            fragmentShader: `
+                uniform float uTime;
+                uniform vec2 uResolution;
+                uniform vec3 uCamPos;
+                uniform mat4 uCamMatrix;
+                uniform float uFovFactor;
+                varying vec2 vUv;
+
+                float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123); }
+                float noise(vec2 p) {
+                    vec2 i = floor(p); vec2 f = fract(p);
+                    vec2 u = f*f*(3.0-2.0*f);
+                    return mix(mix(hash(i + vec2(0.0,0.0)), hash(i + vec2(1.0,0.0)), u.x),
+                               mix(hash(i + vec2(0.0,1.0)), hash(i + vec2(1.0,1.0)), u.x), u.y);
+                }
+                float fbm(vec2 p) {
+                    float v = 0.0; float a = 0.5; vec2 shift = vec2(100.0);
+                    for (int i = 0; i < 5; ++i) {
+                        v += a * noise(p); p = p * 2.0 + shift; a *= 0.5;
+                    }
+                    return v;
+                }
+
+                // 修改后的物理吸积盘（放宽外部和内部边界，增加宽度和渐变，确保上方光环可见）
+                vec4 getDiskDensity(vec3 pos) {
+                    float r = length(pos.xz);
+                    // 保持剔除区间，主要通过核心公式控制分布
+                    if (r < 3.0 || r > 11.5) return vec4(0.0); 
+
+                    float phi = atan(pos.z, pos.x);
+                    float speed = 2.2 * pow(r, -1.5);
+                    float movingPhi = phi - uTime * speed;
+
+                    vec2 uvNoise = vec2(r * 0.9 - uTime * 0.15, movingPhi * 2.5 + sin(r * 0.5));
+                    float n = fbm(uvNoise * 1.3);
+
+                    // 【核心修改点】窄化光圈核心公式：放宽外部边界（从7.0->10.0）和内部渐变（从3.0->2.8），
+                    // 大幅增加总宽度和渐变范围，使后方盘面光线能有效弯曲到黑洞上方。
+                    float d = smoothstep(10.0, 4.0, r) * smoothstep(2.8, 3.8, r);
+                    d *= (n * 1.8);
+
+                    vec3 diskTangent = normalize(vec3(pos.z, 0.0, -pos.x));
+                    vec3 viewDir = normalize(uCamPos - pos);
+                    float dopplerDot = dot(diskTangent, viewDir);
+                    float doppler = dopplerDot * 0.65;
+
+                    vec3 colWhite = vec3(1.7, 1.5, 1.2);
+                    vec3 colOrange = vec3(1.0, 0.40, 0.03);
+                    vec3 colRed = vec3(0.45, 0.03, 0.0);
+
+                    // 色彩渐变区间同步扩大
+                    float t = smoothstep(10.0, 3.2, r);
+                    vec3 color = mix(colRed, colOrange, t);
+                    if(t > 0.75) color = mix(color, colWhite, (t - 0.75) / 0.25);
+
+                    if (doppler > 0.0) {
+                        color += vec3(0.1, 0.35, 0.9) * doppler * 0.5;
+                        d *= (1.0 + doppler * 2.5);
+                    } else {
+                        color = mix(color, vec3(0.3, 0.01, 0.0), -doppler * 0.45);
+                        d *= max(1.0 + doppler * 0.8, 0.35);
+                    }
+
+                    return vec4(color * d, d);
+                }
+
+                vec3 getBackgroundStars(vec3 rd) {
+                    float n = hash(floor(rd.xy * 350.0) + floor(rd.zx * 350.0));
+                    if (n > 0.994) {
+                        float intensity = pow(hash(rd.yx * 99.0), 4.0) * 1.5;
+                        return vec3(intensity * (0.8 + 0.2 * sin(uTime + n * 10.0)));
+                    }
+                    return vec3(0.0);
+                }
+
+                void main() {
+                    vec2 uv = (gl_FragCoord.xy * 2.0 - uResolution) / uResolution.y;
+
+                    vec3 rd = normalize(vec3(uv * uFovFactor, -1.0));
+                    rd = (uCamMatrix * vec4(rd, 0.0)).xyz;
+                    vec3 ro = uCamPos;
+
+                    vec3 colorAccum = vec3(0.0);
+                    float alphaAccum = 0.0;
+
+                    float b = dot(ro, rd);
+                    float c = dot(ro, ro) - 400.0; 
+                    float h = b*b - c;
+                    
+                    float tAdvance = 0.0;
+                    bool hitActiveZone = true;
+                    
+                    if (c > 0.0) { 
+                        if (h < 0.0) hitActiveZone = false; 
+                        else {
+                            tAdvance = -b - sqrt(h);
+                            if (tAdvance < 0.0) hitActiveZone = false;
+                        }
+                    }
+
+                    vec3 v = rd;
+
+                    if (hitActiveZone) {
+                        vec3 p = ro + rd * max(0.0, tAdvance);
+                        float dt = 0.15; 
+                        
+                        for (int i = 0; i < 280; i++) {
+                            float r2 = dot(p, p);
+                            
+                            if (r2 < 4.0) { 
+                                colorAccum = mix(colorAccum, vec3(0.0), 1.0 - alphaAccum);
+                                alphaAccum = 1.0;
+                                break;
+                            }
+                            
+                            if (r2 > 480.0 && i > 15) break;
+
+                            // 相对论引力场弯曲积分
+                            vec3 gFactor = -1.6 * p * pow(r2, -2.5);
+                            v += gFactor * dt;
+                            v = normalize(v);
+                            
+                            float prevY = p.y;
+                            p += v * dt; 
+                            
+                            if ((prevY > 0.0 && p.y <= 0.0) || (prevY < 0.0 && p.y >= 0.0)) {
+                                float tDisc = -prevY / (p.y - prevY);
+                                vec3 intersection = p - v * dt * (1.0 - tDisc);
+                                
+                                vec4 diskSample = getDiskDensity(intersection);
+                                if (diskSample.a > 0.0) {
+                                    float weight = diskSample.a * (1.0 - alphaAccum);
+                                    colorAccum += diskSample.xyz * weight;
+                                    alphaAccum += weight;
+                                    if (alphaAccum >= 0.99) break;
+                                }
+                            }
+                        }
+                    }
+
+                    if (alphaAccum < 1.0) {
+                        vec3 starColor = getBackgroundStars(v);
+                        colorAccum += starColor * (1.0 - alphaAccum);
+                    }
+
+                    colorAccum = pow(colorAccum, vec3(0.85));
+                    colorAccum = mix(colorAccum, vec3(1.0), vec3(length(colorAccum) * 0.03));
+                    
+                    gl_FragColor = vec4(colorAccum, 1.0);
+                }
+            `,
+            depthWrite: false,
+            depthTest: false
+        });
+
+        const mainMesh = new THREE.Mesh(quadGeo, raymarchMaterial);
+        scene.add(mainMesh);
+
+        const clock = new THREE.Clock();
+
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+
+            mathCamera.updateMatrixWorld();
+            
+            raymarchMaterial.uniforms.uTime.value = clock.getElapsedTime();
+            raymarchMaterial.uniforms.uCamPos.value.copy(mathCamera.position);
+            raymarchMaterial.uniforms.uCamMatrix.value.copy(mathCamera.matrixWorld);
+
+            renderer.render(scene, quadCamera);
+        }
+
+        window.addEventListener('resize', onWindowResize, false);
+        function onWindowResize() {
+            mathCamera.aspect = window.innerWidth / window.innerHeight;
+            mathCamera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            raymarchMaterial.uniforms.uResolution.value.set(window.innerWidth, window.innerHeight);
+            raymarchMaterial.uniforms.uFovFactor.value = Math.tan((mathCamera.fov * Math.PI) / 360.0);
+        }
+
+        animate();
+    </script>
+</body>
+</html>
